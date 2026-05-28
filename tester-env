@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# SiYuan - Tester Environment CLI
+# Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+# Commands: deploy, seed, verify, reset, stop, logs, status, help
+
+RUN_ID="default"
+PORT="6806"
+AUTH_CODE="siyuan123"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+refresh_names() {
+    local suffix=""
+    if [[ "${RUN_ID}" != "default" ]]; then
+        suffix="-${RUN_ID}"
+    fi
+
+    CONTAINER_NAME="tester-env-siyuan${suffix}"
+    # IMAGE_TAG set by scripts/rl-env to a content-addressed tag so identical
+    # (baseline, patch-set) combos share an image. Manual invocations get :dev.
+    IMAGE_NAME="${IMAGE_TAG:-tester-env-siyuan:dev}"
+    DATA_VOLUME="siyuan-workspace${suffix}"
+}
+
+cmd_deploy() {
+    echo "==> Building Docker image from source..."
+    docker build -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
+
+    echo "==> Starting container on port ${PORT}..."
+    docker run -d --name "${CONTAINER_NAME}" \
+        -p "${PORT}:6806" \
+        -v "${DATA_VOLUME}:/siyuan/workspace" \
+        -e SIYUAN_ACCESS_AUTH_CODE_BYPASS=true \
+        "${IMAGE_NAME}"
+
+    echo "==> Waiting for app to start..."
+    for i in $(seq 1 30); do
+        if curl -sf http://localhost:"${PORT}"/api/system/version > /dev/null 2>&1; then
+            echo "==> Deployment complete. App running at http://localhost:${PORT}"
+            echo "==> Auth bypassed (SIYUAN_ACCESS_AUTH_CODE_BYPASS=true)"
+            return 0
+        fi
+        sleep 2
+    done
+
+    echo "==> ERROR: App failed to start within 60 seconds."
+    docker logs "${CONTAINER_NAME}" 2>&1 | tail -20
+    return 1
+}
+
+run_seed_python() {
+    local mode="$1"
+    SIYUAN_BASE_URL="http://localhost:${PORT}" SIYUAN_AUTH_CODE="${AUTH_CODE}" SIYUAN_MODE="${mode}" python3 <<'PY'
+import http.cookiejar
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+BASE_URL = os.environ["SIYUAN_BASE_URL"].rstrip("/")
+AUTH_CODE = os.environ["SIYUAN_AUTH_CODE"]
+MODE = os.environ["SIYUAN_MODE"]
+SEED_NOTEBOOK = "Acme Launch Knowledge Base"
+ASSET_PATH = "/data/assets/acme-q2-launch-brief.txt"
+ASSET_TEXT = "Acme Mobile Launch Brief\nOwner: Maya Chen\nFreeze date: 2024-05-15\n"
+
+DOCS = [
+    ("/00 Inbox/Field Research - Metro Retail Visits", """# Field Research - Metro Retail Visits
+
+Tags: #research #retail #launch-2024
+
+Visited pilot stores on 2024-03-12 and 2024-03-13. The most repeated phrase was **checkout beacon friction**.
+
+- Owner: Priya Nair
+- Status: Synthesized
+- Linked decision: ((Market Launch Decision Log))
+"""),
+    ("/01 Projects/Mobile Launch Plan", """# Mobile Launch Plan
+
+Tags: #project #launch-2024 #mobile
+
+Launch date: 2024-06-18. Release manager: Mateo Rossi.
+
+## Milestones
+
+- 2024-04-05: Beta cohort invited
+- 2024-05-15: Localization freeze
+- 2024-06-03: App store submission
+
+Reference attachment: [Q2 launch brief](assets/acme-q2-launch-brief.txt)
+Related notes: ((Weekly Review - 2024-04-19)) and ((Support Escalation Playbook))
+"""),
+    ("/01 Projects/Market Launch Decision Log", """# Market Launch Decision Log
+
+Tags: #decision #launch-2024
+
+| Date | Decision | Owner | Status |
+| --- | --- | --- | --- |
+| 2024-03-21 | Keep free trial at 14 days | Linh Tran | Approved |
+| 2024-04-04 | Delay German paid ads | Sofia Iversen | Deferred |
+| 2024-04-18 | Ship onboarding checklist | Noah Patel | Approved |
+
+Decision D-014 cites [[Mobile Launch Plan]] and the retail research note.
+"""),
+    ("/02 Operations/Support Escalation Playbook", """# Support Escalation Playbook
+
+Tags: #support #operations #playbook
+
+Use this playbook for launch-week incidents.
+
+1. Triage severity in the #support-war-room channel.
+2. Link customer reports to the **checkout beacon friction** search phrase when relevant.
+3. Escalate payment failures to Rowan Kim within 30 minutes.
+
+Service levels: P1 = 15 minutes, P2 = 2 hours, P3 = next business day.
+"""),
+    ("/03 Meetings/Weekly Review - 2024-04-19", """# Weekly Review - 2024-04-19
+
+Tags: #meeting #weekly-review #launch-2024
+
+Attendees: Maya Chen, Mateo Rossi, Priya Nair, Rowan Kim.
+
+## Outcomes
+
+- Mobile Launch Plan remains green.
+- Support Escalation Playbook needs a payment-failure screenshot.
+- Decision Log updated with onboarding checklist approval.
+
+Next review: 2024-04-26.
+"""),
+    ("/04 Reference/Architecture Notes/Sync and Offline Cache", """# Sync and Offline Cache
+
+Tags: #architecture #offline
+
+The mobile client keeps a seven-day offline cache for launch collateral.
+
+- Cache owner: Elena Park
+- Known risk: stale price tables after region switch
+- Mitigation: force refresh after locale change
+
+Links: [[Mobile Launch Plan]] and [[Market Launch Decision Log]].
+"""),
+]
+EXPECTED_DOC_PATHS = sorted({p for path, _ in DOCS for p in ["/" + "/".join(path.strip("/").split("/")[:i]) for i in range(1, len(path.strip("/").split("/")) + 1)]})
+
+def request_json(path, payload=None, retry_login=True):
+    data = json.dumps(payload or {}).encode("utf-8")
+    req = urllib.request.Request(
+        BASE_URL + path,
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        body = OPENER.open(req, timeout=30).read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401 and retry_login:
+            login()
+            return request_json(path, payload, retry_login=False)
+        raise
+    result = json.loads(body)
+    if result.get("code") != 0:
+        raise RuntimeError(f"{path} failed: {result}")
+    return result.get("data")
+
+def request_raw(path, payload=None):
+    data = json.dumps(payload or {}).encode("utf-8")
+    req = urllib.request.Request(BASE_URL + path, data=data, headers={"Content-Type": "application/json"})
+    try:
+        return OPENER.open(req, timeout=30).read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            login()
+            return OPENER.open(req, timeout=30).read().decode("utf-8")
+        raise
+
+def multipart_put_file(path, text, mod_time=1713139200):
+    boundary = "----tester-env-siyuan-seed"
+    parts = []
+    def field(name, value):
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode())
+    field("path", path)
+    field("isDir", "false")
+    field("modTime", str(mod_time))
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"acme-q2-launch-brief.txt\"\r\nContent-Type: text/plain\r\n\r\n".encode())
+    parts.append(text.encode("utf-8"))
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    req = urllib.request.Request(BASE_URL + "/api/file/putFile", data=b"".join(parts), headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    body = OPENER.open(req, timeout=30).read().decode("utf-8")
+    result = json.loads(body)
+    if result.get("code") != 0:
+        raise RuntimeError(f"putFile failed: {result}")
+
+def login():
+    request_json("/api/system/loginAuth", {"authCode": AUTH_CODE, "rememberMe": True}, retry_login=False)
+
+def wait_ready():
+    for _ in range(60):
+        try:
+            request_json("/api/system/version", {})
+            return
+        except Exception:
+            time.sleep(1)
+    raise RuntimeError("SiYuan API did not become ready")
+
+def notebooks():
+    return request_json("/api/notebook/lsNotebooks", {})["notebooks"]
+
+def seed():
+    for nb in list(notebooks()):
+        if nb.get("name") == SEED_NOTEBOOK:
+            request_json("/api/notebook/removeNotebook", {"notebook": nb["id"]})
+    nb = request_json("/api/notebook/createNotebook", {"name": SEED_NOTEBOOK})["notebook"]
+    notebook_id = nb["id"]
+    request_json("/api/notebook/setNotebookConf", {"notebook": notebook_id, "conf": {"name": SEED_NOTEBOOK, "closed": False, "refCreateSavePath": "", "createDocNameTemplate": "", "dailyNoteSavePath": "/Journal/2024/04", "dailyNoteTemplatePath": ""}})
+    multipart_put_file(ASSET_PATH, ASSET_TEXT)
+    for path, markdown in DOCS:
+        request_json("/api/filetree/createDocWithMd", {"notebook": notebook_id, "path": path, "markdown": markdown})
+    request_json("/api/sqlite/flushTransaction", {})
+    verify()
+    print(f"Seeded {SEED_NOTEBOOK}: 1 notebook, {len(EXPECTED_DOC_PATHS)} visible documents ({len(DOCS)} authored notes), 18 tag mentions, 1 attachment")
+
+def sql(stmt):
+    return request_json("/api/query/sql", {"stmt": stmt})
+
+def verify():
+    matches = [nb for nb in notebooks() if nb.get("name") == SEED_NOTEBOOK]
+    if len(matches) != 1:
+        raise AssertionError(f"expected one seed notebook, found {len(matches)}")
+    nbid = matches[0]["id"]
+    for _ in range(20):
+        docs = sql(f"SELECT hpath, content FROM blocks WHERE box='{nbid}' AND type='d' ORDER BY hpath")
+        phrase = sql(f"SELECT id, content FROM blocks WHERE box='{nbid}' AND content LIKE '%checkout beacon friction%'")
+        if len(docs) == len(EXPECTED_DOC_PATHS) and len(phrase) >= 2:
+            break
+        time.sleep(0.5)
+        request_json("/api/sqlite/flushTransaction", {})
+    expected_paths = EXPECTED_DOC_PATHS
+    actual_paths = sorted(row["hpath"] for row in docs)
+    if actual_paths != expected_paths:
+        raise AssertionError(f"document paths differ: {actual_paths}")
+    tags = sql(f"SELECT count(*) AS c FROM blocks WHERE box='{nbid}' AND markdown LIKE '%#launch-2024%'")
+    if int(tags[0]["c"]) < 3:
+        raise AssertionError("expected at least 3 #launch-2024 blocks")
+    data = request_raw("/api/file/getFile", {"path": ASSET_PATH})
+    if "Maya Chen" not in data:
+        raise AssertionError("attachment content missing Maya Chen")
+    print("Verified seed state: notebook=Acme Launch Knowledge Base visible_docs=12 authored_notes=6 phrase=checkout beacon friction tag=#launch-2024 attachment=acme-q2-launch-brief.txt")
+
+OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+wait_ready()
+if MODE == "seed":
+    seed()
+elif MODE == "verify":
+    verify()
+else:
+    raise SystemExit(f"unknown mode {MODE}")
+PY
+}
+
+cmd_seed() {
+    echo "==> Seeding deterministic SiYuan knowledge base data..."
+    run_seed_python seed
+}
+
+cmd_verify() {
+    echo "==> Verifying deterministic SiYuan seed data..."
+    run_seed_python verify
+}
+
+cmd_reset() {
+    echo "==> Resetting environment..."
+    docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+    docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+    docker volume rm "${DATA_VOLUME}" 2>/dev/null || true
+    echo "==> Reset complete. Run 'deploy' to start fresh."
+}
+
+cmd_stop() {
+    echo "==> Stopping container..."
+    docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+    echo "==> Stopped."
+}
+
+cmd_logs() {
+    docker logs -f "${CONTAINER_NAME}" 2>/dev/null || echo "Container not running."
+}
+
+cmd_status() {
+    if docker ps --filter "name=${CONTAINER_NAME}" --format "{{.Names}}" | grep -q "${CONTAINER_NAME}"; then
+        echo "Status: RUNNING"
+        echo "URL: http://localhost:${PORT}"
+        echo "Container: ${CONTAINER_NAME}"
+        echo "Volume: ${DATA_VOLUME}"
+    else
+        echo "Status: NOT RUNNING"
+    fi
+}
+
+cmd_help() {
+    cat <<EOF
+SiYuan - Tester Environment CLI
+
+Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+
+Commands:
+  deploy    Build image from source, start container
+  seed      Create deterministic knowledge-base seed data
+  verify    Check seeded notebook, documents, tags, and attachment
+  reset     Stop container, remove container and data volume
+  stop      Stop container (preserves data)
+  logs      Tail container logs
+  status    Show container status
+  help      Show this help message
+
+Options:
+  --run-id <id>     Isolate container, and volume names for parallel runs.
+                    Default: default
+  --port <port>     Host port to bind to container port 6806.
+                    Default: 6806
+
+Env vars:
+  IMAGE_TAG         Docker image tag (default: tester-env-siyuan:dev).
+                    Set by scripts/rl-env for content-addressed runs.
+
+Typical workflow:
+  ./tester-env deploy              # Build and start
+  ./tester-env seed                # Populate deterministic demo data
+  ./tester-env verify              # Check seeded data
+  ./tester-env status              # Check status
+  ./tester-env logs                # View logs
+  ./tester-env reset               # Clean slate
+
+Auth: Seed/verify use access auth code ${AUTH_CODE} when needed; deploy bypasses auth by default (SIYUAN_ACCESS_AUTH_CODE_BYPASS=true).
+  To use auth, replace the env var with --accessAuthCode=<code> in the
+  Docker run command in cmd_deploy().
+
+Workspace: All data is in /siyuan/workspace (mounted as a Docker volume).
+  Reset removes the volume for a clean slate.
+EOF
+}
+
+main() {
+    local cmd="${1:-help}"
+
+    # Parse optional arguments
+    for ((i=2; i<=$#; i++)); do
+        local arg="${!i}"
+        case "${arg}" in
+            --run-id)
+                local next=$((i+1))
+                if [[ ${next} -le $# ]]; then
+                    RUN_ID="${!next}"
+                    ((i++))
+                else
+                    echo "Error: --run-id requires a value"
+                    exit 1
+                fi
+                ;;
+            --port)
+                local next=$((i+1))
+                if [[ ${next} -le $# ]]; then
+                    PORT="${!next}"
+                    ((i++))
+                else
+                    echo "Error: --port requires a value"
+                    exit 1
+                fi
+                ;;
+            --help|-h)
+                cmd_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: ${arg}"
+                cmd_help
+                exit 1
+                ;;
+        esac
+    done
+
+    refresh_names
+
+	case "${cmd}" in
+		deploy) cmd_deploy ;;
+		seed) cmd_seed ;;
+		verify) cmd_verify ;;
+		reset) cmd_reset ;;
+        stop) cmd_stop ;;
+        logs) cmd_logs ;;
+        status) cmd_status ;;
+        help|--help|-h) cmd_help ;;
+        *)
+            echo "Unknown command: ${cmd}"
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
