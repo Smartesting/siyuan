@@ -67,6 +67,13 @@ MODE = os.environ["SIYUAN_MODE"]
 SEED_NOTEBOOK = "Acme Launch Knowledge Base"
 ASSET_PATH = "/data/assets/acme-q2-launch-brief.txt"
 ASSET_TEXT = "Acme Mobile Launch Brief\nOwner: Maya Chen\nFreeze date: 2024-05-15\n"
+IMAGE_ASSET_PATH = "/data/assets/acme-launch-beacon-map.svg"
+IMAGE_ASSET_TEXT = """<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80">
+  <rect width="120" height="80" fill="#e7f0ff"/>
+  <circle cx="60" cy="40" r="18" fill="#2f6feb"/>
+  <text x="60" y="45" text-anchor="middle" font-family="Arial" font-size="12" fill="white">Beacon</text>
+</svg>
+"""
 
 DOCS = [
     ("/00 Inbox/Field Research - Metro Retail Visits", """# Field Research - Metro Retail Visits
@@ -144,6 +151,34 @@ The mobile client keeps a seven-day offline cache for launch collateral.
 
 Links: [[Mobile Launch Plan]] and [[Market Launch Decision Log]].
 """),
+    ("/04 Reference/Launch Database Fixtures", """# Launch Database Fixtures
+
+Tags: #database #launch-2024 #qa-fixture
+
+This note provides deterministic table-style fixture data for database scenario setup and static seed compliance.
+
+## Mixed-case Beacon Filter Fixture
+
+| Signal | Owner | Notes |
+| --- | --- | --- |
+| Beacon | Priya Nair | Uppercase Beacon value for case-sensitive database filtering. |
+| beacon | Mateo Rossi | Lowercase beacon value for case-sensitive database filtering. |
+
+## Launch Status Options Fixture
+
+Allowed status options: Planned, In Review, Ready, and Blocked.
+
+| Workstream | Status |
+| --- | --- |
+| Retail training | Planned |
+| Localization audit | In Review |
+| App store packet | Ready |
+| Payment fallback | Blocked |
+
+## Image Asset Field Fixture
+
+Launch image attachment for database asset-field checks: ![Acme launch beacon map](assets/acme-launch-beacon-map.svg)
+"""),
 ]
 EXPECTED_DOC_PATHS = sorted({p for path, _ in DOCS for p in ["/" + "/".join(path.strip("/").split("/")[:i]) for i in range(1, len(path.strip("/").split("/")) + 1)]})
 
@@ -177,7 +212,7 @@ def request_raw(path, payload=None):
             return OPENER.open(req, timeout=30).read().decode("utf-8")
         raise
 
-def multipart_put_file(path, text, mod_time=1713139200):
+def multipart_put_file(path, content, filename, content_type, mod_time=1713139200):
     boundary = "----tester-env-siyuan-seed"
     parts = []
     def field(name, value):
@@ -185,8 +220,8 @@ def multipart_put_file(path, text, mod_time=1713139200):
     field("path", path)
     field("isDir", "false")
     field("modTime", str(mod_time))
-    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"acme-q2-launch-brief.txt\"\r\nContent-Type: text/plain\r\n\r\n".encode())
-    parts.append(text.encode("utf-8"))
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n".encode())
+    parts.append(content if isinstance(content, bytes) else content.encode("utf-8"))
     parts.append(f"\r\n--{boundary}--\r\n".encode())
     req = urllib.request.Request(BASE_URL + "/api/file/putFile", data=b"".join(parts), headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
     body = OPENER.open(req, timeout=30).read().decode("utf-8")
@@ -216,12 +251,13 @@ def seed():
     nb = request_json("/api/notebook/createNotebook", {"name": SEED_NOTEBOOK})["notebook"]
     notebook_id = nb["id"]
     request_json("/api/notebook/setNotebookConf", {"notebook": notebook_id, "conf": {"name": SEED_NOTEBOOK, "closed": False, "refCreateSavePath": "", "createDocNameTemplate": "", "dailyNoteSavePath": "/Journal/2024/04", "dailyNoteTemplatePath": ""}})
-    multipart_put_file(ASSET_PATH, ASSET_TEXT)
+    multipart_put_file(ASSET_PATH, ASSET_TEXT, "acme-q2-launch-brief.txt", "text/plain")
+    multipart_put_file(IMAGE_ASSET_PATH, IMAGE_ASSET_TEXT, "acme-launch-beacon-map.svg", "image/svg+xml")
     for path, markdown in DOCS:
         request_json("/api/filetree/createDocWithMd", {"notebook": notebook_id, "path": path, "markdown": markdown})
     request_json("/api/sqlite/flushTransaction", {})
     verify()
-    print(f"Seeded {SEED_NOTEBOOK}: 1 notebook, {len(EXPECTED_DOC_PATHS)} visible documents ({len(DOCS)} authored notes), 18 tag mentions, 1 attachment")
+    print(f"Seeded {SEED_NOTEBOOK}: 1 notebook, {len(EXPECTED_DOC_PATHS)} visible documents ({len(DOCS)} authored notes), 21 tag mentions, 2 attachments")
 
 def sql(stmt):
     return request_json("/api/query/sql", {"stmt": stmt})
@@ -248,7 +284,15 @@ def verify():
     data = request_raw("/api/file/getFile", {"path": ASSET_PATH})
     if "Maya Chen" not in data:
         raise AssertionError("attachment content missing Maya Chen")
-    print("Verified seed state: notebook=Acme Launch Knowledge Base visible_docs=12 authored_notes=6 phrase=checkout beacon friction tag=#launch-2024 attachment=acme-q2-launch-brief.txt")
+    image = request_raw("/api/file/getFile", {"path": IMAGE_ASSET_PATH})
+    if not image:
+        raise AssertionError("image attachment missing")
+    fixture = sql(f"SELECT content, markdown FROM blocks WHERE box='{nbid}' AND hpath LIKE '/04 Reference/Launch Database Fixtures%'")
+    fixture_text = "\n".join((row.get("content") or "") + "\n" + (row.get("markdown") or "") for row in fixture)
+    for expected in ["Beacon", "beacon", "Planned", "In Review", "Ready", "Blocked", "acme-launch-beacon-map.svg"]:
+        if expected not in fixture_text:
+            raise AssertionError(f"database fixture missing {expected}")
+    print("Verified seed state: notebook=Acme Launch Knowledge Base visible_docs=13 authored_notes=7 phrase=checkout beacon friction tag=#launch-2024 attachments=acme-q2-launch-brief.txt,acme-launch-beacon-map.svg database_fixture=Beacon/beacon/status-options/image")
 
 OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 wait_ready()

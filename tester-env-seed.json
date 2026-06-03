@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "app": "siyuan",
+  "profile": "default",
+  "requirements": {
+    "acme-notebook": {
+      "status": "present",
+      "evidence": "tester-env seed creates one notebook named Acme Launch Knowledge Base."
+    },
+    "mobile-launch-plan-headings": {
+      "status": "present",
+      "evidence": "tester-env seed creates /01 Projects/Mobile Launch Plan with editable Markdown headings '# Mobile Launch Plan' and '## Milestones'."
+    },
+    "searchable-checkout-beacon-friction": {
+      "status": "present",
+      "evidence": "Seeded Acme notes contain the exact phrase checkout beacon friction in Field Research - Metro Retail Visits and Support Escalation Playbook."
+    },
+    "seeded-launch-tags": {
+      "status": "present",
+      "evidence": "Seeded Acme notes contain deterministic launch tags including #launch-2024."
+    },
+    "editable-acme-note": {
+      "status": "present",
+      "evidence": "Seeded Acme notebook includes editable notes such as Mobile Launch Plan and Weekly Review - 2024-04-19."
+    },
+    "reference-target-block": {
+      "status": "present",
+      "evidence": "Seeded Acme notes include linkable note targets such as Mobile Launch Plan and Market Launch Decision Log."
+    },
+    "database-mixed-case-beacon-values": {
+      "status": "present",
+      "evidence": "tester-env seed creates /04 Reference/Launch Database Fixtures with table rows containing exact text values Beacon and beacon."
+    },
+    "database-image-asset-field": {
+      "status": "present",
+      "evidence": "tester-env seed creates /04 Reference/Launch Database Fixtures with an image attachment assets/acme-launch-beacon-map.svg for database asset-field checks."
+    },
+    "readonly-mode-ui": {
+      "status": "present",
+      "evidence": "SiYuan deployed web UI exposes editor read-only mode via the breadcrumb/header readonly control (app/src/protyle/breadcrumb/index.ts uses data-type=readonly and app/src/protyle/breadcrumb/action.ts toggles editor readOnly)."
+    },
+    "database-select-options": {
+      "status": "present",
+      "evidence": "tester-env seed creates /04 Reference/Launch Database Fixtures with deterministic status options Planned, In Review, Ready, and Blocked."
+    }
+  }
+}
