@@ -9,6 +9,9 @@ RUN_ID="default"
 PORT="6806"
 AUTH_CODE="siyuan123"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TESTER_ENV_PROJECT="${TESTER_ENV_PROJECT:-tester-env}"
+TESTER_ENV_APP="${TESTER_ENV_APP:-siyuan}"
+TESTER_ENV_SCENARIO="${TESTER_ENV_SCENARIO:-manual}"
 
 refresh_names() {
     local suffix=""
@@ -25,10 +28,25 @@ refresh_names() {
 
 cmd_deploy() {
     echo "==> Building Docker image from source..."
-    docker build -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
+    docker build \
+        --label "tester-env.project=${TESTER_ENV_PROJECT}" \
+        --label "tester-env.app=${TESTER_ENV_APP}" \
+        --label "tester-env.scenario=${TESTER_ENV_SCENARIO}" \
+        -t "${IMAGE_NAME}" \
+        "${SCRIPT_DIR}"
 
     echo "==> Starting container on port ${PORT}..."
+    docker volume create \
+        --label "tester-env.project=${TESTER_ENV_PROJECT}" \
+        --label "tester-env.app=${TESTER_ENV_APP}" \
+        --label "tester-env.scenario=${TESTER_ENV_SCENARIO}" \
+        --label "tester-env.run_id=${TESTER_ENV_RUN_ID:-${RUN_ID}}" \
+        "${DATA_VOLUME}" >/dev/null
     docker run -d --name "${CONTAINER_NAME}" \
+        --label "tester-env.project=${TESTER_ENV_PROJECT}" \
+        --label "tester-env.app=${TESTER_ENV_APP}" \
+        --label "tester-env.scenario=${TESTER_ENV_SCENARIO}" \
+        --label "tester-env.run_id=${TESTER_ENV_RUN_ID:-${RUN_ID}}" \
         -p "${PORT}:6806" \
         -v "${DATA_VOLUME}:/siyuan/workspace" \
         -e SIYUAN_ACCESS_AUTH_CODE_BYPASS=true \
